@@ -49,7 +49,7 @@
             top: 15%;
             left: 50%;
             transform: translateX(-50%);
-            color: #fff;
+            color: #FFFFFF; /* AI White */
             font-size: 24px;
             font-weight: bold;
             letter-spacing: 4px;
@@ -84,19 +84,26 @@
     
     // Visual Settings
     const JITTER_AMOUNT = 0.5; 
-    const LINE_SEGMENT_LENGTH = 15; // Increased length for performance
+    const LINE_SEGMENT_LENGTH = 15; 
     
     // Colors
-    const COLOR_GRID = 'rgba(255, 255, 255, 0.15)'; 
-    const COLOR_MAP = '#ffffff';   
+    const COLOR_GRID = 'rgba(0, 128, 128, 0.3)'; // Faint Teal
+    const COLOR_MAP = '#008080';   // Deep Teal Outline
+    const COLOR_WAVES = 'rgba(0, 128, 128, 0.3)'; // Faint Teal
+    const COLOR_FILL = '#ff7869'; // Vibrant Peach
+    
     const GRID_WIDTH = 1.0;
     const MAP_WIDTH = 1.8;
+    const WAVE_WIDTH = 1.2;
 
     // State
     let gridPoints = [];
     let countries = []; 
+    let waves = []; 
+    
     let rotationY = -1.5; 
     let rotationX = 0.3; 
+    let selectedCountryName = null; // Track selection
     
     // Interaction
     let isDragging = false;
@@ -132,7 +139,6 @@
 
     function initGrid() {
         gridPoints = [];
-        // Reduced grid density slightly for performance
         for (let i = 0; i < SEGMENTS_LON; i++) {
             const theta = (i / SEGMENTS_LON) * Math.PI * 2;
             const line = [];
@@ -158,6 +164,25 @@
                 line.push({x, y, z});
             }
             gridPoints.push(line);
+        }
+    }
+
+    function initWaves() {
+        waves = [];
+        const numWaves = 150; 
+        
+        for (let i = 0; i < numWaves; i++) {
+            const lat = (Math.random() - 0.5) * 160; 
+            const lon = (Math.random() - 0.5) * 360;
+            
+            const waveLine = [];
+            const span = 2 + Math.random() * 2; 
+            
+            waveLine.push(getSpherePoint(lat, lon - span, BASE_RADIUS));
+            waveLine.push(getSpherePoint(lat, lon, BASE_RADIUS));
+            waveLine.push(getSpherePoint(lat, lon + span, BASE_RADIUS));
+            
+            waves.push(waveLine);
         }
     }
 
@@ -214,7 +239,6 @@
             const lon2 = p2[0], lat2 = p2[1];
             
             const dist = Math.hypot(lon2 - lon1, lat2 - lat1);
-            // Optimization: Increased divider from 3 to 6 to reduce total point count
             const steps = Math.ceil(dist / 6); 
             
             for (let s = 0; s < steps; s++) {
@@ -271,9 +295,13 @@
         let bestCandidate = null;
         let minZ = Infinity;
 
-        // Optimized Hit Test: Skip expensive checks if far off-screen
         const maxRadiusSq = (BASE_RADIUS * globeScale * 1.2) ** 2;
-        if (mouseX*mouseX + mouseY*mouseY > maxRadiusSq) return;
+        if (mouseX*mouseX + mouseY*mouseY > maxRadiusSq) {
+            // Clicked outside globe, deselect
+            selectedCountryName = null;
+            labelEl.style.opacity = 0;
+            return;
+        }
 
         countries.forEach(country => {
             country.rings.forEach(ringPoints => {
@@ -281,7 +309,6 @@
                 let ringZSum = 0;
                 let visiblePoints = 0;
                 
-                // Downsample ring for hit testing to save CPU
                 for(let i=0; i<ringPoints.length; i+=2) {
                     const p = ringPoints[i];
                     let r = rotateY(p, rotationY);
@@ -314,11 +341,13 @@
         });
 
         if (bestCandidate) {
+            selectedCountryName = bestCandidate;
             labelEl.textContent = bestCandidate;
             labelEl.style.opacity = 1;
             labelEl.style.transform = "translateX(-50%) scale(1.1)";
             setTimeout(() => labelEl.style.transform = "translateX(-50%) scale(1)", 100);
         } else {
+            selectedCountryName = null;
             labelEl.style.opacity = 0;
         }
     }
@@ -360,25 +389,12 @@
         };
     }
 
-    function drawOcean(radius) {
-        if (radius <= 0) return;
-        const grad = ctx.createRadialGradient(0, 0, radius * 0.2, 0, 0, radius);
-        grad.addColorStop(0, '#1a3b5a');
-        grad.addColorStop(0.8, '#0b1a2e'); 
-        grad.addColorStop(1, '#050a12'); 
-
-        ctx.beginPath();
-        ctx.arc(0, 0, radius, 0, Math.PI * 2);
-        ctx.fillStyle = grad;
-        ctx.fill();
-    }
-
     function easeOutElastic(x) {
         const c4 = (2 * Math.PI) / 3;
         return x === 0 ? 0 : x === 1 ? 1 : Math.pow(2, -10 * x) * Math.sin((x * 10 - 0.75) * c4) + 1;
     }
 
-    // --- Optimized Render Loop ---
+    // --- Render Loop ---
     
     function renderFrame(timestamp) {
         if (!startTime) startTime = timestamp;
@@ -399,25 +415,16 @@
             }
         }
 
-        const rProj = project({x: BASE_RADIUS, y: 0, z: 0});
-        const visualRadius = rProj.x; 
-        
-        drawOcean(visualRadius);
-
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
 
-        // Optimized Batch Drawing
-        // Instead of stroking every tiny segment (thousands of draw calls), 
-        // we stroke once per ring or once per batch.
-        
-        const drawBatch = (lines, color, width, isGrid) => {
+        // Optimized Batch Drawing for Lines
+        const drawBatch = (lines, color, width, isGrid, jitterScale = 1.0) => {
             ctx.beginPath();
             ctx.strokeStyle = color;
             ctx.lineWidth = width;
 
-            // Reduce jitter frequency: Only calculate jitter if dist > threshold
-            const jitterFactor = isGrid ? JITTER_AMOUNT : JITTER_AMOUNT * 0.5;
+            const jitterFactor = (isGrid ? JITTER_AMOUNT : JITTER_AMOUNT * 0.5) * jitterScale;
 
             lines.forEach(line => {
                 let prevPt = null;
@@ -428,9 +435,7 @@
                     let r = rotateY(p, rotationY);
                     r = rotateX(r, rotationX);
                     
-                    // Simple Culling
                     if (r.z > 50) { 
-                        // If it goes behind, we break the line
                         prevPt = null;
                         isLineActive = false;
                         continue; 
@@ -441,18 +446,14 @@
                     if (prevPt) {
                         const dist = Math.abs(proj.x - prevPt.x) + Math.abs(proj.y - prevPt.y);
                         
-                        // Move to start of segment if we were interrupted
                         if (!isLineActive) {
                             ctx.moveTo(prevPt.x, prevPt.y);
                             isLineActive = true;
                         }
 
-                        // Just draw straight line if segment is small (Optimization)
                         if (dist < 5) {
                             ctx.lineTo(proj.x, proj.y);
                         } else {
-                            // Add Jitter points
-                            // We do this inline to avoid function call overhead
                             const steps = Math.floor(dist / LINE_SEGMENT_LENGTH);
                             if (steps > 0) {
                                 for (let s = 1; s <= steps; s++) {
@@ -460,7 +461,6 @@
                                     let tx = prevPt.x + (proj.x - prevPt.x) * t;
                                     let ty = prevPt.y + (proj.y - prevPt.y) * t;
                                     
-                                    // Fast random
                                     tx += (Math.random() - 0.5) * jitterFactor * 2;
                                     ty += (Math.random() - 0.5) * jitterFactor * 2;
                                     
@@ -476,11 +476,54 @@
             ctx.stroke();
         };
 
+        const drawSelectedFill = () => {
+            if (!selectedCountryName) return;
+            const country = countries.find(c => c.name === selectedCountryName);
+            if (!country) return;
+
+            ctx.fillStyle = COLOR_FILL;
+            
+            country.rings.forEach(ring => {
+                // Calculate Average Z for culling
+                let zSum = 0;
+                let validCount = 0;
+                
+                const projectedRing = [];
+                for(let i=0; i<ring.length; i+=2) {
+                    let r = rotateY(ring[i], rotationY);
+                    r = rotateX(r, rotationX);
+                    zSum += r.z;
+                    validCount++;
+                    projectedRing.push(project(r));
+                }
+                
+                const avgZ = zSum / validCount;
+                if (avgZ > 50) return; // Cull back-facing polygons
+
+                // Draw Fill
+                ctx.beginPath();
+                if(projectedRing.length > 0) {
+                    ctx.moveTo(projectedRing[0].x, projectedRing[0].y);
+                    for(let i=1; i<projectedRing.length; i++) {
+                        ctx.lineTo(projectedRing[i].x, projectedRing[i].y);
+                    }
+                    ctx.closePath();
+                    ctx.fill();
+                }
+            });
+        };
+
         // 1. Grid
         drawBatch(gridPoints, COLOR_GRID, GRID_WIDTH, true);
         
-        // 2. Map
+        // 2. Waves
+        drawBatch(waves, COLOR_WAVES, WAVE_WIDTH, true);
+        
+        // 3. Map
         if (isDataLoaded) {
+            // Draw Fill First (so outline sits on top)
+            drawSelectedFill();
+            
             const allMapLines = countries.flatMap(c => c.rings);
             drawBatch(allMapLines, COLOR_MAP, MAP_WIDTH, false);
         }
@@ -491,6 +534,7 @@
     window.addEventListener('resize', resize);
     resize();
     initGrid();
+    initWaves(); 
     loadMapData();
     requestAnimationFrame(renderFrame);
 
