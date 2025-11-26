@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grease Pencil Globe - Interactive</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050508; /* Deep Space */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            cursor: grab;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        body.grabbing {
+            cursor: grabbing;
+        }
+        canvas {
+            filter: blur(0.5px) contrast(1.1); 
+        }
+        .ui-layer {
+            position: absolute;
+            bottom: 30px;
+            color: #556677;
+            font-size: 12px;
+            letter-spacing: 2px;
+            pointer-events: none;
+            text-align: center;
+            width: 100%;
+            text-transform: uppercase;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ffffff;
+            font-size: 14px;
+            letter-spacing: 2px;
+            pointer-events: none;
+            transition: opacity 0.5s;
+        }
+        #country-label {
+            position: absolute;
+            top: 15%;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #fff;
+            font-size: 24px;
+            font-weight: bold;
+            letter-spacing: 4px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+            pointer-events: none;
+            text-transform: uppercase;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="loading">LOADING MAP DATA...</div>
+    <div id="country-label"></div>
+    <div class="ui-layer">Drag to Spin • Click a Country</div>
+
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const loadingEl = document.getElementById('loading');
+    const labelEl = document.getElementById('country-label');
+
+    let width, height;
+    
+    // Configuration
+    let globeScale = 1; 
+    const BASE_RADIUS = 220;
+    const AUTO_ROTATION_SPEED = 0.002;
+    const SEGMENTS_LAT = 18; 
+    const SEGMENTS_LON = 24; 
+    
+    // Visual Settings
+    const JITTER_AMOUNT = 0.5; 
+    const LINE_SEGMENT_LENGTH = 15; // Increased length for performance
+    
+    // Colors
+    const COLOR_GRID = 'rgba(255, 255, 255, 0.15)'; 
+    const COLOR_MAP = '#ffffff';   
+    const GRID_WIDTH = 1.0;
+    const MAP_WIDTH = 1.8;
+
+    // State
+    let gridPoints = [];
+    let countries = []; 
+    let rotationY = -1.5; 
+    let rotationX = 0.3; 
+    
+    // Interaction
+    let isDragging = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+    let velocityX = 0;
+    let velocityY = 0;
+
+    // Animation
+    let startTime = null;
+    let entranceProgress = 0;
+    let isDataLoaded = false;
+
+    const GEOJSON_URL = 'https://d2ad6b4ur7yvpq.cloudfront.net/naturalearth-3.3.0/ne_110m_admin_0_countries.geojson';
+
+    function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+        ctx.translate(width / 2, height / 2);
+    }
+
+    function getSpherePoint(lat, lon, r) {
+        const phi = (90 - lat) * (Math.PI / 180);
+        const theta = (lon + 180) * (Math.PI / 180); 
+        return {
+            x: r * Math.sin(phi) * Math.cos(theta), 
+            y: -r * Math.cos(phi), 
+            z: r * Math.sin(phi) * Math.sin(theta)
+        };
+    }
+
+    function initGrid() {
+        gridPoints = [];
+        // Reduced grid density slightly for performance
+        for (let i = 0; i < SEGMENTS_LON; i++) {
+            const theta = (i / SEGMENTS_LON) * Math.PI * 2;
+            const line = [];
+            for (let j = 0; j <= 30; j++) {
+                const phi = (j / 30) * Math.PI;
+                const r = BASE_RADIUS;
+                const x = r * Math.sin(phi) * Math.cos(theta);
+                const y = -r * Math.cos(phi);
+                const z = r * Math.sin(phi) * Math.sin(theta);
+                line.push({x, y, z});
+            }
+            gridPoints.push(line);
+        }
+        for (let i = 1; i < SEGMENTS_LAT; i++) {
+            const phi = (i / SEGMENTS_LAT) * Math.PI;
+            const line = [];
+            for (let j = 0; j <= 40; j++) {
+                const theta = (j / 40) * Math.PI * 2;
+                const r = BASE_RADIUS;
+                const x = r * Math.sin(phi) * Math.cos(theta);
+                const y = -r * Math.cos(phi);
+                const z = r * Math.sin(phi) * Math.sin(theta);
+                line.push({x, y, z});
+            }
+            gridPoints.push(line);
+        }
+    }
+
+    async function loadMapData() {
+        try {
+            const response = await fetch(GEOJSON_URL);
+            if (!response.ok) throw new Error('Network response was not ok');
+            const data = await response.json();
+            processGeoJSON(data);
+            isDataLoaded = true;
+            loadingEl.style.opacity = 0;
+            setTimeout(() => loadingEl.remove(), 1000);
+        } catch (error) {
+            console.error('Error fetching map data:', error);
+            loadingEl.textContent = "OFFLINE MODE";
+            loadingEl.style.color = "#ff4444";
+        }
+    }
+
+    function processGeoJSON(geojson) {
+        countries = [];
+        geojson.features.forEach(feature => {
+            const name = feature.properties.name || feature.properties.admin || "Unknown";
+            const geometry = feature.geometry;
+            if (!geometry) return;
+            
+            const countryObj = { name: name, rings: [] };
+            
+            const type = geometry.type;
+            const coords = geometry.coordinates;
+            
+            if (type === 'Polygon') {
+                coords.forEach(ring => {
+                    countryObj.rings.push(processRing(ring));
+                });
+            } else if (type === 'MultiPolygon') {
+                coords.forEach(poly => {
+                    poly.forEach(ring => {
+                        countryObj.rings.push(processRing(ring));
+                    });
+                });
+            }
+            
+            countries.push(countryObj);
+        });
+    }
+
+    function processRing(ring) {
+        const points3d = [];
+        for (let i = 0; i < ring.length - 1; i++) {
+            const p1 = ring[i];
+            const p2 = ring[i+1];
+            const lon1 = p1[0], lat1 = p1[1];
+            const lon2 = p2[0], lat2 = p2[1];
+            
+            const dist = Math.hypot(lon2 - lon1, lat2 - lat1);
+            // Optimization: Increased divider from 3 to 6 to reduce total point count
+            const steps = Math.ceil(dist / 6); 
+            
+            for (let s = 0; s < steps; s++) {
+                const t = s / steps;
+                const lat = lat1 + (lat2 - lat1) * t;
+                const lon = lon1 + (lon2 - lon1) * t;
+                points3d.push(getSpherePoint(lat, lon, BASE_RADIUS));
+            }
+        }
+        const last = ring[ring.length - 1];
+        points3d.push(getSpherePoint(last[1], last[0], BASE_RADIUS));
+        return points3d;
+    }
+
+    // --- Interaction ---
+
+    function handleStart(x, y) {
+        isDragging = true;
+        lastMouseX = x;
+        lastMouseY = y;
+        document.body.classList.add('grabbing');
+        velocityX = 0;
+        velocityY = 0;
+    }
+
+    function handleMove(x, y) {
+        if (!isDragging) return;
+        const deltaX = x - lastMouseX;
+        const deltaY = y - lastMouseY;
+        rotationY += deltaX * 0.005; 
+        rotationX += deltaY * 0.005;
+        velocityX = deltaX * 0.005; 
+        velocityY = deltaY * 0.005;
+        lastMouseX = x;
+        lastMouseY = y;
+    }
+
+    function handleEnd() {
+        isDragging = false;
+        document.body.classList.remove('grabbing');
+    }
+    
+    function handleWheel(e) {
+        globeScale += e.deltaY * -0.001;
+        globeScale = Math.min(Math.max(.5, globeScale), 3);
+    }
+    
+    function handleClick(e) {
+        if (isDragging) return;
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left - width/2;
+        const mouseY = e.clientY - rect.top - height/2;
+
+        let bestCandidate = null;
+        let minZ = Infinity;
+
+        // Optimized Hit Test: Skip expensive checks if far off-screen
+        const maxRadiusSq = (BASE_RADIUS * globeScale * 1.2) ** 2;
+        if (mouseX*mouseX + mouseY*mouseY > maxRadiusSq) return;
+
+        countries.forEach(country => {
+            country.rings.forEach(ringPoints => {
+                const poly2d = [];
+                let ringZSum = 0;
+                let visiblePoints = 0;
+                
+                // Downsample ring for hit testing to save CPU
+                for(let i=0; i<ringPoints.length; i+=2) {
+                    const p = ringPoints[i];
+                    let r = rotateY(p, rotationY);
+                    r = rotateX(r, rotationX);
+                    const proj = project(r);
+                    poly2d.push(proj);
+                    ringZSum += proj.z;
+                    if(proj.z <= 50) visiblePoints++;
+                }
+                
+                if (visiblePoints < poly2d.length * 0.5) return; 
+
+                const avgZ = ringZSum / poly2d.length;
+                if (avgZ > 50) return; 
+
+                let inside = false;
+                for (let i = 0, j = poly2d.length - 1; i < poly2d.length; j = i++) {
+                    const xi = poly2d[i].x, yi = poly2d[i].y;
+                    const xj = poly2d[j].x, yj = poly2d[j].y;
+                    const intersect = ((yi > mouseY) !== (yj > mouseY))
+                        && (mouseX < (xj - xi) * (mouseY - yi) / (yj - yi) + xi);
+                    if (intersect) inside = !inside;
+                }
+
+                if (inside && avgZ < minZ) {
+                    minZ = avgZ;
+                    bestCandidate = country.name;
+                }
+            });
+        });
+
+        if (bestCandidate) {
+            labelEl.textContent = bestCandidate;
+            labelEl.style.opacity = 1;
+            labelEl.style.transform = "translateX(-50%) scale(1.1)";
+            setTimeout(() => labelEl.style.transform = "translateX(-50%) scale(1)", 100);
+        } else {
+            labelEl.style.opacity = 0;
+        }
+    }
+
+    window.addEventListener('mousedown', e => handleStart(e.clientX, e.clientY));
+    window.addEventListener('mousemove', e => handleMove(e.clientX, e.clientY));
+    window.addEventListener('mouseup', handleEnd);
+    window.addEventListener('click', handleClick);
+    window.addEventListener('wheel', handleWheel);
+    window.addEventListener('touchstart', e => handleStart(e.touches[0].clientX, e.touches[0].clientY));
+    window.addEventListener('touchmove', e => handleMove(e.touches[0].clientX, e.touches[0].clientY), { passive: false });
+    window.addEventListener('touchend', handleEnd);
+
+    // --- Drawing Functions ---
+
+    function rotateY(p, theta) {
+        return {
+            x: p.x * Math.cos(theta) - p.z * Math.sin(theta),
+            y: p.y,
+            z: p.x * Math.sin(theta) + p.z * Math.cos(theta)
+        };
+    }
+
+    function rotateX(p, theta) {
+        return {
+            x: p.x,
+            y: p.y * Math.cos(theta) - p.z * Math.sin(theta),
+            z: p.y * Math.sin(theta) + p.z * Math.cos(theta)
+        };
+    }
+
+    function project(p) {
+        const scale = (800 / (800 + p.z)) * globeScale * entranceProgress;
+        return {
+            x: p.x * scale,
+            y: p.y * scale,
+            z: p.z,
+            scale: scale
+        };
+    }
+
+    function drawOcean(radius) {
+        if (radius <= 0) return;
+        const grad = ctx.createRadialGradient(0, 0, radius * 0.2, 0, 0, radius);
+        grad.addColorStop(0, '#1a3b5a');
+        grad.addColorStop(0.8, '#0b1a2e'); 
+        grad.addColorStop(1, '#050a12'); 
+
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.fillStyle = grad;
+        ctx.fill();
+    }
+
+    function easeOutElastic(x) {
+        const c4 = (2 * Math.PI) / 3;
+        return x === 0 ? 0 : x === 1 ? 1 : Math.pow(2, -10 * x) * Math.sin((x * 10 - 0.75) * c4) + 1;
+    }
+
+    // --- Optimized Render Loop ---
+    
+    function renderFrame(timestamp) {
+        if (!startTime) startTime = timestamp;
+        const rawProgress = Math.min((timestamp - startTime) / 2500, 1);
+        entranceProgress = easeOutElastic(rawProgress);
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+        ctx.translate(width/2, height/2);
+
+        if (!isDragging) {
+            rotationY -= AUTO_ROTATION_SPEED; 
+            if (Math.abs(velocityX) > 0.0001 || Math.abs(velocityY) > 0.0001) {
+                rotationY += velocityX;
+                rotationX += velocityY;
+                velocityX *= 0.95;
+                velocityY *= 0.95;
+            }
+        }
+
+        const rProj = project({x: BASE_RADIUS, y: 0, z: 0});
+        const visualRadius = rProj.x; 
+        
+        drawOcean(visualRadius);
+
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // Optimized Batch Drawing
+        // Instead of stroking every tiny segment (thousands of draw calls), 
+        // we stroke once per ring or once per batch.
+        
+        const drawBatch = (lines, color, width, isGrid) => {
+            ctx.beginPath();
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+
+            // Reduce jitter frequency: Only calculate jitter if dist > threshold
+            const jitterFactor = isGrid ? JITTER_AMOUNT : JITTER_AMOUNT * 0.5;
+
+            lines.forEach(line => {
+                let prevPt = null;
+                let isLineActive = false;
+
+                for (let i=0; i<line.length; i++) {
+                    const p = line[i];
+                    let r = rotateY(p, rotationY);
+                    r = rotateX(r, rotationX);
+                    
+                    // Simple Culling
+                    if (r.z > 50) { 
+                        // If it goes behind, we break the line
+                        prevPt = null;
+                        isLineActive = false;
+                        continue; 
+                    }
+
+                    const proj = project(r);
+
+                    if (prevPt) {
+                        const dist = Math.abs(proj.x - prevPt.x) + Math.abs(proj.y - prevPt.y);
+                        
+                        // Move to start of segment if we were interrupted
+                        if (!isLineActive) {
+                            ctx.moveTo(prevPt.x, prevPt.y);
+                            isLineActive = true;
+                        }
+
+                        // Just draw straight line if segment is small (Optimization)
+                        if (dist < 5) {
+                            ctx.lineTo(proj.x, proj.y);
+                        } else {
+                            // Add Jitter points
+                            // We do this inline to avoid function call overhead
+                            const steps = Math.floor(dist / LINE_SEGMENT_LENGTH);
+                            if (steps > 0) {
+                                for (let s = 1; s <= steps; s++) {
+                                    const t = s / (steps + 1);
+                                    let tx = prevPt.x + (proj.x - prevPt.x) * t;
+                                    let ty = prevPt.y + (proj.y - prevPt.y) * t;
+                                    
+                                    // Fast random
+                                    tx += (Math.random() - 0.5) * jitterFactor * 2;
+                                    ty += (Math.random() - 0.5) * jitterFactor * 2;
+                                    
+                                    ctx.lineTo(tx, ty);
+                                }
+                            }
+                            ctx.lineTo(proj.x, proj.y);
+                        }
+                    }
+                    prevPt = proj;
+                }
+            });
+            ctx.stroke();
+        };
+
+        // 1. Grid
+        drawBatch(gridPoints, COLOR_GRID, GRID_WIDTH, true);
+        
+        // 2. Map
+        if (isDataLoaded) {
+            const allMapLines = countries.flatMap(c => c.rings);
+            drawBatch(allMapLines, COLOR_MAP, MAP_WIDTH, false);
+        }
+
+        requestAnimationFrame(renderFrame);
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+    initGrid();
+    loadMapData();
+    requestAnimationFrame(renderFrame);
+
+</script>
+</body>
+</html>
