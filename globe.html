@@ -64,9 +64,9 @@
 </head>
 <body>
     <canvas id="canvas"></canvas>
-    <div id="loading">LOADING MAP DATA...</div>
+    <div id="loading">ESTABLISHING ORBIT...</div>
     <div id="country-label"></div>
-    <div class="ui-layer">Drag to Spin • Click a Country</div>
+    <!-- <div class="ui-layer">Drag to Spin • Click a Country</div> -->
 
 <script>
     const canvas = document.getElementById('canvas');
@@ -83,6 +83,8 @@
     const WAVE_SPEED = 0.05; 
     const SEGMENTS_LAT = 18; 
     const SEGMENTS_LON = 24; 
+    const CLOUD_ALTITUDE = 25;
+    const CLOUD_SPEED = 0.0007;
     
     // Visual Settings
     const JITTER_AMOUNT = 0.5; 
@@ -92,17 +94,21 @@
     const COLOR_GRID = 'rgba(0, 128, 128, 0.25)'; 
     const COLOR_MAP = '#008080';   // Default Deep Teal Outline
     const COLOR_WAVES = 'rgba(100, 255, 255, 0.3)'; // Lighter, more transparent waves
-    const COLOR_LAND_SELECTED = '#00dcbe'; // Bright Teal for Selection (Requested)
+    const COLOR_LAND_SELECTED = '#00dcbe'; // Bright Teal for Selection
+    const COLOR_SPACESHIP = 'rgba(220, 240, 255, 0.9)'; // Cool white for ship
+    const COLOR_CLOUD = 'rgba(255, 255, 255, 0.85)'; // White outlines
     
     const GRID_WIDTH = 1.0;
     const MAP_WIDTH = 1.8;
     const WAVE_WIDTH = 1.5;
+    const CLOUD_WIDTH = 1.8;
 
     // State
     let gridPoints = [];
     let countries = []; 
     let wavesData = []; 
     let stars = []; 
+    let spaceshipStrokes = [];
     
     let rotationY = -1.5; 
     let rotationX = 0.3; 
@@ -118,6 +124,9 @@
     let velocityX = 0;
     let velocityY = 0;
     let isPotentialClick = false;
+    // Pinch Zoom State
+    let initialPinchDist = null;
+    let pinchStartScale = 1;
 
     // Animation
     let startTime = null;
@@ -191,13 +200,44 @@
         const numStars = 400;
         for (let i = 0; i < numStars; i++) {
             stars.push({
-                x: (Math.random() - 0.5) * width * 2, // Spread wider for resize safety
-                y: (Math.random() - 0.5) * height * 2,
+                x: (Math.random() - 0.5) * width * 3, // Wider field for panning
+                y: (Math.random() - 0.5) * height * 3,
+                z: Math.random() * 2, // Depth factor
                 size: Math.random() * 1.5,
                 opacity: Math.random(),
                 speed: 0.01 + Math.random() * 0.03 
             });
         }
+    }
+
+
+    // Realistic Grease Pencil Spaceship
+    function initSpaceship() {
+        spaceshipStrokes = [];
+        const addStroke = (pts) => spaceshipStrokes.push(pts);
+
+        // -- Main Fuselage (Flipped horizontally) --
+        addStroke([{x: -80, y: 0}, {x: -60, y: -12}, {x: 20, y: -18}, {x: 70, y: -15}, {x: 80, y: -10}, {x: 80, y: 10}, {x: 70, y: 15}, {x: 20, y: 18}, {x: -60, y: 12}, {x: -80, y: 0}]);
+        
+        // Cockpit / Bridge (Flipped)
+        addStroke([{x: -30, y: -10}, {x: -50, y: -5}, {x: -50, y: 5}, {x: -30, y: 10}, {x: -30, y: -10}]);
+        addStroke([{x: -35, y: -10}, {x: -35, y: 10}]); 
+
+        // -- Wings (Flipped) --
+        addStroke([{x: 10, y: -18}, {x: 60, y: -60}, {x: 80, y: -60}, {x: 60, y: -16}]);
+        addStroke([{x: 10, y: 18}, {x: 60, y: 60}, {x: 80, y: 60}, {x: 60, y: 16}]);
+        addStroke([{x: 30, y: -30}, {x: 50, y: -30}]);
+        addStroke([{x: 30, y: 30}, {x: 50, y: 30}]);
+
+        // -- Engines (Flipped) --
+        addStroke([{x: 80, y: -8}, {x: 95, y: -12}, {x: 95, y: 12}, {x: 80, y: 8}]);
+        addStroke([{x: 80, y: -60}, {x: 85, y: -60}, {x: 85, y: -50}, {x: 80, y: -50}]); 
+        addStroke([{x: 80, y: 60}, {x: 85, y: 60}, {x: 85, y: 50}, {x: 80, y: 50}]); 
+
+        // -- Hull Details (Flipped) --
+        addStroke([{x: 0, y: -18}, {x: 0, y: 18}]); 
+        addStroke([{x: 40, y: -16}, {x: 40, y: 16}]);
+        addStroke([{x: -10, y: -15}, {x: 5, y: -35}, {x: 5, y: -50}]);
     }
 
     async function loadMapData() {
@@ -265,6 +305,9 @@
     // --- Interaction ---
 
     function handleStart(x, y) {
+        // Disable interaction during intro
+        if (entranceProgress < 0.95) return;
+
         isDragging = true;
         isPotentialClick = true;
         lastMouseX = x;
@@ -282,7 +325,6 @@
         const dx = x - dragStartX;
         const dy = y - dragStartY;
         
-        // If moved more than 5 pixels, it's a drag, not a click
         if (Math.sqrt(dx*dx + dy*dy) > 5) {
             isPotentialClick = false;
         }
@@ -306,12 +348,13 @@
     }
     
     function handleWheel(e) {
+        if (entranceProgress < 0.95) return;
         globeScale += e.deltaY * -0.001;
         globeScale = Math.min(Math.max(.5, globeScale), 3);
     }
     
     function handleClick(e) {
-        // Only process if it was a clean click/tap without much dragging
+        if (entranceProgress < 0.95) return;
         if (!isPotentialClick) return;
 
         const rect = canvas.getBoundingClientRect();
@@ -331,7 +374,6 @@
                 let ringZSum = 0;
                 let validPoints = 0;
                 
-                // Increased sampling for better hit detection accuracy
                 for(let i=0; i<ring3d.length; i+=2) {
                     const p = ring3d[i];
                     let r = rotateY(p, rotationY);
@@ -377,27 +419,44 @@
     window.addEventListener('click', handleClick);
     window.addEventListener('wheel', handleWheel);
     
-    // Touch Events with preventDefault to stop scrolling while interacting
     window.addEventListener('touchstart', e => {
-        handleStart(e.touches[0].clientX, e.touches[0].clientY);
+        if (e.touches.length === 2) {
+            isDragging = false; 
+            isPotentialClick = false; 
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            initialPinchDist = Math.hypot(dx, dy);
+            pinchStartScale = globeScale;
+        } else if (e.touches.length === 1) {
+            handleStart(e.touches[0].clientX, e.touches[0].clientY);
+        }
     }, { passive: false });
     
     window.addEventListener('touchmove', e => {
-        e.preventDefault(); // Prevent page scroll on mobile
-        handleMove(e.touches[0].clientX, e.touches[0].clientY);
+        e.preventDefault(); 
+        if (e.touches.length === 2 && initialPinchDist) {
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            const dist = Math.hypot(dx, dy);
+            const scaleChange = dist / initialPinchDist;
+            globeScale = Math.min(Math.max(0.5, pinchStartScale * scaleChange), 3);
+        } else if (e.touches.length === 1) {
+            handleMove(e.touches[0].clientX, e.touches[0].clientY);
+        }
     }, { passive: false });
     
     window.addEventListener('touchend', (e) => {
-        handleEnd();
-        // Synthesize click for taps if needed, though 'click' usually fires
-        if (isPotentialClick && e.changedTouches.length > 0) {
-            // We manually trigger click logic if the browser doesn't
-            const touch = e.changedTouches[0];
-            handleClick({
-                clientX: touch.clientX,
-                clientY: touch.clientY
-            });
-            isPotentialClick = false; // Consume the click
+        if (e.touches.length < 2) initialPinchDist = null;
+        if (e.touches.length === 0) {
+            handleEnd();
+            if (isPotentialClick && e.changedTouches.length > 0) {
+                const touch = e.changedTouches[0];
+                handleClick({
+                    clientX: touch.clientX,
+                    clientY: touch.clientY
+                });
+                isPotentialClick = false; 
+            }
         }
     }, { passive: false });
 
@@ -420,7 +479,10 @@
     }
 
     function project(p) {
-        const scale = (800 / (800 + p.z)) * globeScale * entranceProgress;
+        // Apply entrance zoom effect
+        const entranceZoom = 0.1 + entranceProgress * 0.9;
+        
+        const scale = (800 / (800 + p.z)) * globeScale * entranceZoom;
         return {
             x: p.x * scale,
             y: p.y * scale,
@@ -429,47 +491,51 @@
         };
     }
 
-    function drawStars() {
-        ctx.fillStyle = '#ffffff';
-        stars.forEach(star => {
-            star.opacity += star.speed;
-            if (star.opacity > 1 || star.opacity < 0.2) {
-                star.speed = -star.speed;
-            }
-            const alpha = Math.max(0, Math.min(1, star.opacity));
-            ctx.globalAlpha = alpha * (0.5 + Math.random() * 0.3); 
-            ctx.beginPath();
-            ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
-            ctx.fill();
-        });
-        ctx.globalAlpha = 1.0;
-    }
-
-    function easeOutElastic(x) {
-        const c4 = (2 * Math.PI) / 3;
-        return x === 0 ? 0 : x === 1 ? 1 : Math.pow(2, -10 * x) * Math.sin((x * 10 - 0.75) * c4) + 1;
+    function easeOutExpo(x) {
+        return x === 1 ? 1 : 1 - Math.pow(2, -10 * x);
     }
 
     // --- Render Loop ---
     
     function renderFrame(timestamp) {
         if (!startTime) startTime = timestamp;
-        const rawProgress = Math.min((timestamp - startTime) / 2500, 1);
-        entranceProgress = easeOutElastic(rawProgress);
+        // 3 seconds duration for entrance
+        const rawProgress = Math.min((timestamp - startTime) / 3500, 1);
+        entranceProgress = easeOutExpo(rawProgress);
+
+        const speedShake = (1 - entranceProgress) * 2; 
 
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.clearRect(0, 0, width, height);
         
-        // Draw Stars centered relative to window to avoid shifting
+        const panOffset = (1 - entranceProgress) * -width * 0.8; 
+        
         ctx.save();
-        ctx.translate(width/2, height/2); // Stars were generated centered? No, 0..width
-        // Actually stars stored screen space.
-        ctx.restore(); 
-        drawStars();
+        const shakeX = (Math.random() - 0.5) * speedShake;
+        const shakeY = (Math.random() - 0.5) * speedShake;
+        ctx.translate(width/2 + shakeX, height/2 + shakeY);
 
-        ctx.translate(width/2, height/2);
+        // Draw Stars
+        ctx.fillStyle = '#ffffff';
+        stars.forEach(star => {
+            ctx.globalAlpha = star.opacity * (0.5 + Math.random() * 0.5);
+            
+            let starX = star.x + panOffset * star.z * 0.5; // Parallax
+            
+            ctx.beginPath();
+            if (entranceProgress < 0.8) {
+                ctx.rect(starX, star.y, star.size + (1-entranceProgress)*50, star.size);
+            } else {
+                ctx.arc(starX, star.y, star.size, 0, Math.PI * 2);
+            }
+            ctx.fill();
+        });
+        ctx.globalAlpha = 1.0;
 
-        if (!isDragging) {
+        // --- Globe Layer ---
+        ctx.translate(panOffset, 0);
+
+        if (!isDragging && entranceProgress > 0.9) {
             rotationY -= AUTO_ROTATION_SPEED; 
             if (Math.abs(velocityX) > 0.0001 || Math.abs(velocityY) > 0.0001) {
                 rotationY += velocityX;
@@ -544,7 +610,7 @@
         // 2. Grid
         drawBatch(gridPoints, COLOR_GRID, GRID_WIDTH, true);
         
-        // 3. Waves
+        // 3. Waves (Animated)
         const currentWaveLines = wavesData.map(w => {
             const currentLon = w.lon + waveOffset;
             const waveRadius = BASE_RADIUS * 1.005; 
@@ -574,10 +640,59 @@
             }
             
             if(selectedRings.length > 0) {
-                // Draw selected country with brighter, thicker outline
                 drawBatch(selectedRings, COLOR_LAND_SELECTED, MAP_WIDTH * 1.8, false);
             }
         }
+
+        // --- Spaceship (Foreground) ---
+        ctx.restore(); 
+        
+        ctx.save();
+        // Move to right side
+        ctx.translate(width * 0.85, height * 0.5);
+        
+        const shipY = (Math.cos(timestamp * 0.001) * 10); 
+        const shipRot = Math.sin(timestamp * 0.0005) * 0.05;
+        const shipScale = 0.6 + entranceProgress * 0.2; 
+
+        ctx.translate(0, shipY);
+        ctx.scale(shipScale, shipScale);
+        // Negative rotation to tilt up-left
+        ctx.rotate(shipRot - Math.PI/24); 
+
+        // Draw Spaceship
+        ctx.beginPath();
+        ctx.strokeStyle = COLOR_SPACESHIP;
+        ctx.lineWidth = 1.5;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        
+        spaceshipStrokes.forEach(stroke => {
+            if(stroke.length < 2) return;
+            
+            let lx = stroke[0].x;
+            let ly = stroke[0].y;
+            ctx.moveTo(lx, ly);
+            
+            for(let i=1; i<stroke.length; i++) {
+                const p = stroke[i];
+                const dist = Math.hypot(p.x - lx, p.y - ly);
+                const steps = Math.max(1, Math.floor(dist / 5));
+                
+                for(let k=1; k<=steps; k++) {
+                    const t = k/steps;
+                    let tx = lx + (p.x - lx)*t;
+                    let ty = ly + (p.y - ly)*t;
+                    tx += (Math.random()-0.5)*1;
+                    ty += (Math.random()-0.5)*1;
+                    ctx.lineTo(tx, ty);
+                }
+                lx = p.x;
+                ly = p.y;
+            }
+        });
+        ctx.stroke();
+        ctx.restore();
 
         requestAnimationFrame(renderFrame);
     }
@@ -587,6 +702,7 @@
     initGrid();
     initWaves(); 
     initStars();
+    initSpaceship();
     loadMapData();
     requestAnimationFrame(renderFrame);
 
